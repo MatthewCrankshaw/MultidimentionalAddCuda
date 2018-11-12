@@ -15,8 +15,37 @@ const double RMAX = 8.0;
 
 
 //Global kernel code that runs on the device
-__global__ void count_in(){
+__global__ void count_in(long *dev_index, bool *dev_isInSphereList, long *dev_count, long *dev_ndim, long *dev_halfb, double *dev_rsquare, long *dev_base){
+	//dev_index is array of longs with length ndim
+	//isInSphereList is array of bool with length ntotal
 
+	// double rtestsq = 0;
+	// bool inSphere = false; 
+
+	// for(long k = 0; k < dev_ndim; ++k){
+	// 	double xk = idx[k] - (*dev_halfb);
+	// 	rtestsq += xk * xk;
+	// }
+
+	// if(rtestsq < (*dev_rsquare)) inSphere = true; 
+	
+	// //may produce error
+	// //addone(dev_index, ndim, base, 0);
+
+	// long newv = index[i] + 1;
+	// if (newv >= base) {
+	// 	index[i] = 0;
+	// if (i < ndim - 1) 
+	// 	addone(index, ndim, base, i+1);
+	// }
+	// else {
+	// 	index[i] = newv;
+	// }
+
+	// long i = 1;
+	// if(inSphere){
+	// 	atomicAdd(dev_count, i);
+	// }
 }
 
 void err_check(cudaError_t err, char* text){
@@ -35,36 +64,30 @@ long powlong(long n, long k)
   return p;
 }
 
-void addone(long *index, long ndim,long base, long i)
-/* Add one to a digital counter of given base. When one digit hits
-   maximum, it is necessary to carry one over into the next
-   column. This is done recursively here. */
-{
-  long newv = index[i] + 1;
-  if (newv >= base) {
-    index[i] = 0;
-    if (i < ndim - 1) addone(index, ndim, base, i+1);
-  }
-  else {
-    index[i] = newv;
-  }
-}
+void count_in_seq(long *index, bool *sphereList, long pos,long ndim, long halfb, double rsquare, long base){ 
+	
+	//convert(pos, base, idx, ndim);
 
-void count_in_seq(long *idx, bool *sphereList, long &count, int pos,long ndim, long halfb, double rsquare, long base){ 
+	long num = pos;
+
+	for (long i = 0; i < ndim; ++i) index[i] = 0;
+  	long idx = 0;
+  	while (num != 0) {
+    	long rem = num % base;
+    	num = num / base;
+    	index[idx] = rem;
+    	++idx;
+  	}
+
 	double rtestsq = 0;
 	bool inSphere = false; 
 
 	for(long k = 0; k < ndim; ++k){
-		double xk = idx[k] - halfb;
+		double xk = index[k] - halfb;
 		rtestsq += xk * xk;
 	}
 
-	if(rtestsq< rsquare) inSphere = true;
-	addone(idx, ndim, base, 0);
-
-	if(inSphere){
-  		count++;
-  	}
+	if(rtestsq< rsquare) sphereList[pos] = true;
 }
 
 
@@ -86,7 +109,7 @@ int main(int argc, char **argv){
     const long  ndim = lrand48() % (MAXDIM - 1) + 1;
     std::cout << "Trial Number " << n << " Radius " << radius << " Dimensions " << ndim << " ... " << std::endl;
 
-    long *count = 0;
+    long count = 0;
 
     const long halfb = static_cast<long>(floor(radius));
   	const long base = 2 * halfb + 1;
@@ -152,18 +175,24 @@ int main(int argc, char **argv){
   	cout << "Number of Blocks Per Grid: " << numBlocks << endl;
   	cout << "N Total: " << ntotal << endl;
 
-  	count_in<<<threadsPerBlock, numBlocks>>>();
+  	count_in<<<threadsPerBlock, numBlocks>>>(dev_index, dev_isInSphereList, dev_count, dev_ndim, dev_halfb, dev_rsquare, dev_base);
 
-  	err = cudaMemcpy(count, dev_count, sizeof(long), cudaMemcpyDeviceToHost);
+  	err = cudaMemcpy(&count, dev_count, sizeof(long), cudaMemcpyDeviceToHost);
   	err_check(err, "count cpy to host");
 
 
   	//sequential
   	for(long n = 0; n < ntotal; ++n){
-  		count_in_seq(index, isInSphereList, count, n, ndim , halfb, rsquare, base);
+  		count_in_seq(index, isInSphereList, n, ndim , halfb, rsquare, base);
   	}
 
-    std::cout << " -> " << "count" << " " << count << std::endl;
+  	for(int i = 0; i < ntotal; i++){
+  		if(isInSphereList[i]){
+  			count ++;
+  		}
+  	}
+
+    std::cout << " -> " << "count" << " " << count << "\n" << std::endl;
 
     free(index);
   }
