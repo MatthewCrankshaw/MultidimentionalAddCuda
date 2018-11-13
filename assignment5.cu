@@ -19,35 +19,38 @@ const double RMAX = 8.0;
 
 
 //Global kernel code that runs on the device
-__global__ void count_in(unsigned long long*dev_count, long dev_ntotal,long dev_ndim, long dev_halfb, double dev_rsquare, long dev_base){
+__global__ void count_in(ULL *dev_count, long dev_ntotal,long dev_ndim, long dev_halfb, double dev_rsquare, long dev_base){
 	
-	int pos = (blockIdx.x * blockDim.x) + threadIdx.x;
+	//Calculate the position of this kernel in the data
+	ULL blockID = (blockIdx.y * gridDim.x) + blockIdx.x;
+	ULL pos = (blockID * blockDim.x) + threadIdx.x;
 
-	if(pos > dev_ntotal) return;
+	//If this threads position in the data is further than we need to calculate
+	//Then we return
+	if(pos >= dev_ntotal) return;
 
 	double rtestsq = 0;
 	long idx = 0;
-
 	long index[MAXDIM];
-
-	for (long i = 0; i < dev_ndim; ++i){
-		index[i] = 0;
-	}
-  	
-  	while (pos != 0) {
+	for (long i = 0; i < dev_ndim; ++i) index[i] = 0;
+	
+  	//Convert the decimal number into another base system
+   	while (pos != 0) {
     	long rem = pos % dev_base;
-    	pos = pos / dev_base;
-    	index[idx] = rem;
+     	pos = pos / dev_base;
+     	index[idx] = rem;
     	++idx;
   	}
 
+
 	for(long k = 0; k < dev_ndim; ++k){
-		double xk = index[k] - dev_halfb;
-		rtestsq += xk * xk;
+	 	double xk = index[k] - dev_halfb;
+	 	rtestsq += xk * xk;
 	}
 
+	//If the value is inside the sphere
+	//Atomically add 1 to the count
 	if(rtestsq < dev_rsquare){
-		//This needs to be an atomic add
 		atomicAdd(dev_count, 1);
 	}
 }
@@ -118,8 +121,11 @@ int main(int argc, char **argv){
     const long  ndim = lrand48() % (MAXDIM - 1) + 1;
     std::cout << "Trial Number " << n << " Radius " << radius << " Dimensions " << ndim << " ... " << std::endl;
 
+
+    //Count for counting the number of integer points that land in the circle
     ULL count = 0;
 
+    //Set up the variable that will be needed by the cuda kernel
     const long halfb = static_cast<long>(floor(radius));
   	const long base = 2 * halfb + 1;
   	const double rsquare = radius * radius;
@@ -128,41 +134,29 @@ int main(int argc, char **argv){
 
     //CUDA part
     //=======================================================
-  	//we need to split the problem into each pixel being an integer point
-  	cout << "count: " << count << endl;
+  	//we need to split the problem each integer point in the n dimentional space
+
+  	// Set up the device count variable which we will need to retrieve later
   	ULL *dev_count;
+  	cudaMalloc((void**)&dev_count, sizeof(ULL));
+  	cudaMemcpy(dev_count, &count, sizeof(ULL), cudaMemcpyHostToDevice);
 
-  	cudaMalloc((void**)&dev_count, sizeof(unsigned long long));
+ 	//Set up the number of threads per block and blocks per grid
+  	dim3 threadsPerBlock(1024, 1, 1);
+  	dim3 blocksPerGrid(65535,7,1);
 
-  	cudaMemcpy(dev_count, &count, sizeof(unsigned long long), cudaMemcpyHostToDevice);
+
+  	cout << "Number of Threads Per Block: " << threadsPerBlock.x 	<< " " << threadsPerBlock.y << " " << threadsPerBlock.z << endl;
+  	cout << "Number of Blocks Per Grid: " 	<< blocksPerGrid.x 		<< " " << blocksPerGrid.y 	<< " " << blocksPerGrid.z 	<< endl;
+  	cout << "N Total: " 					<< ntotal 				<< endl;
+
+  	//Run the device kernel
+  	count_in<<<blocksPerGrid, threadsPerBlock>>>(dev_count, ntotal, ndim, halfb, rsquare, base);
 
 
-  	int threadsPerBlock = 1024; 
-  	int numBlocks = (ntotal + threadsPerBlock - 1) / threadsPerBlock;
-
-  	cout << "Number of Threads Per Block: " << threadsPerBlock << endl;
-  	cout << "Number of Blocks Per Grid: " << numBlocks << endl;
-  	cout << "N Total: " << ntotal << endl;
-
-  	count_in<<<threadsPerBlock, numBlocks>>>(dev_count, ntotal, ndim, halfb, rsquare, base);
-
+  	//Retrieve the memory from the device for the count
   	cudaMemcpy(&count, dev_count, sizeof(unsigned long long), cudaMemcpyDeviceToHost);
 
-
-  	// //sequential
-  	// int thread = 0;
-  	// int block = 0;
-  	// for(long n = 0; n < ntotal; ++n){
-  	// 	count_in_seq(count, thread, block, ndim , halfb, rsquare, base);
-  	// 	if(thread+1 > 1024){
-  	// 		thread = 0;
-  	// 		block+=1;
-  	// 	}else{
-  	// 		thread++;
-  	// 	}
-  	// }
-
     std::cout << " -> " << "count" << " " << count << "\n" << std::endl;
-
   }
 }
