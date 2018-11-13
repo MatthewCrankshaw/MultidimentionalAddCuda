@@ -19,35 +19,36 @@ const double RMAX = 8.0;
 
 
 //Global kernel code that runs on the device
-__global__ void count_in(unsigned long long*dev_count, long *dev_ndim, long *dev_halfb, double *dev_rsquare, long *dev_base){
+__global__ void count_in(unsigned long long*dev_count, long dev_ntotal,long dev_ndim, long dev_halfb, double dev_rsquare, long dev_base){
 	
 	int pos = (blockIdx.x * blockDim.x) + threadIdx.x;
-	long num = pos;
+
+	if(pos > dev_ntotal) return;
+
 	double rtestsq = 0;
 	long idx = 0;
 
 	long index[MAXDIM];
 
-	for (long i = 0; i < (*dev_ndim); ++i){
+	for (long i = 0; i < dev_ndim; ++i){
 		index[i] = 0;
 	}
   	
-  	while (num != 0) {
-    	long rem = num % (*dev_base);
-    	num = num / (*dev_base);
+  	while (pos != 0) {
+    	long rem = pos % dev_base;
+    	pos = pos / dev_base;
     	index[idx] = rem;
     	++idx;
   	}
 
-	for(long k = 0; k < (*dev_ndim); ++k){
-		double xk = index[k] - (*dev_halfb);
+	for(long k = 0; k < dev_ndim; ++k){
+		double xk = index[k] - dev_halfb;
 		rtestsq += xk * xk;
 	}
 
-	if(rtestsq< (*dev_rsquare)){
-
+	if(rtestsq < dev_rsquare){
 		//This needs to be an atomic add
-		atomicAdd(dev_count, (unsigned long long)1);
+		atomicAdd(dev_count, 1);
 	}
 }
 
@@ -66,11 +67,10 @@ long powlong(long n, long k)
   for (long i = 0; i < k; ++i) p *= n;
   return p;
 }
-
+					
 void count_in_seq(ULL &count,int thread, int block,long ndim, long halfb, double rsquare, long base){ 
 
-	int pos = (block * 1024) + thread;
-	long num = pos;
+	int num = (block * 1024) + thread;
 	double rtestsq = 0;
 	long idx = 0;
 
@@ -106,7 +106,7 @@ void count_in_seq(ULL &count,int thread, int block,long ndim, long halfb, double
 
 int main(int argc, char **argv){ 
   // You can make this larger if you want
-  const long ntrials = 3;
+  const long ntrials = 10;
 
   for (long n = 0; n < ntrials; ++n) {
 
@@ -126,39 +126,16 @@ int main(int argc, char **argv){
   	const long ntotal = powlong(base, ndim);
 
 
-
     //CUDA part
     //=======================================================
   	//we need to split the problem into each pixel being an integer point
-
-  	long *dev_index;
+  	cout << "count: " << count << endl;
   	ULL *dev_count;
-  	long *dev_ndim; 
-  	long *dev_halfb; 
-  	double *dev_rsquare;
-  	long *dev_base;
 
-  	cudaError_t err = cudaMalloc((void**)&dev_count, sizeof(unsigned long long));
-  	err_check(err, "count cpy to host");
-  	err = cudaMalloc((void**)&dev_ndim, sizeof(long));
-  	err_check(err, "count cpy to host");
-  	err = cudaMalloc((void**)&dev_halfb, sizeof(long));
-  	err_check(err, "count cpy to host");
-  	err = cudaMalloc((void**)&dev_rsquare, sizeof(double));
-  	err_check(err, "count cpy to host");
-  	err = cudaMalloc((void**)&dev_base, sizeof(long));
-	err_check(err, "count cpy to host");
+  	cudaMalloc((void**)&dev_count, sizeof(unsigned long long));
 
-  	err = cudaMemcpy(dev_count, &count, sizeof(unsigned long long), cudaMemcpyHostToDevice);
-  	err_check(err, "count cpy to host");
-  	err = cudaMemcpy(dev_ndim, &ndim, sizeof(long), cudaMemcpyHostToDevice);
-  	err_check(err, "count cpy to host");
-  	err = cudaMemcpy(dev_halfb, &halfb, sizeof(long), cudaMemcpyHostToDevice);
-  	err_check(err, "count cpy to host");
-  	err = cudaMemcpy(dev_rsquare, &rsquare, sizeof(double), cudaMemcpyHostToDevice);
-  	err_check(err, "count cpy to host");
-	err = cudaMemcpy(dev_base, &base, sizeof(long),cudaMemcpyHostToDevice);
-	err_check(err, "count cpy to host"); 
+  	cudaMemcpy(dev_count, &count, sizeof(unsigned long long), cudaMemcpyHostToDevice);
+
 
   	int threadsPerBlock = 1024; 
   	int numBlocks = (ntotal + threadsPerBlock - 1) / threadsPerBlock;
@@ -167,24 +144,23 @@ int main(int argc, char **argv){
   	cout << "Number of Blocks Per Grid: " << numBlocks << endl;
   	cout << "N Total: " << ntotal << endl;
 
-  	//count_in<<<threadsPerBlock, numBlocks>>>(dev_count, dev_ndim, dev_halfb, dev_rsquare, dev_base);
+  	count_in<<<threadsPerBlock, numBlocks>>>(dev_count, ntotal, ndim, halfb, rsquare, base);
 
-  	err = cudaMemcpy(&count, dev_count, sizeof(unsigned long long), cudaMemcpyDeviceToHost);
-  	err_check(err, "count cpy to host");
+  	cudaMemcpy(&count, dev_count, sizeof(unsigned long long), cudaMemcpyDeviceToHost);
 
 
-  	//sequential
-  	int thread = 0;
-  	int block = 0;
-  	for(long n = 0; n < ntotal; ++n){
-  		count_in_seq(count, thread, block, ndim , halfb, rsquare, base);
-  		if(thread+1 > 1024){
-  			thread = 0;
-  			block+=1;
-  		}else{
-  			thread++;
-  		}
-  	}
+  	// //sequential
+  	// int thread = 0;
+  	// int block = 0;
+  	// for(long n = 0; n < ntotal; ++n){
+  	// 	count_in_seq(count, thread, block, ndim , halfb, rsquare, base);
+  	// 	if(thread+1 > 1024){
+  	// 		thread = 0;
+  	// 		block+=1;
+  	// 	}else{
+  	// 		thread++;
+  	// 	}
+  	// }
 
     std::cout << " -> " << "count" << " " << count << "\n" << std::endl;
 
