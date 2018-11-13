@@ -9,43 +9,46 @@ using namespace std;
 
 #include<cuda.h>
 
+#define ULL unsigned long long
+
 const long MAXDIM = 10;
 const double RMIN = 2.0;
 const double RMAX = 8.0;
 
 
+
+
 //Global kernel code that runs on the device
-__global__ void count_in(long *dev_index, bool *dev_isInSphereList, long *dev_count, long *dev_ndim, long *dev_halfb, double *dev_rsquare, long *dev_base){
-	//dev_index is array of longs with length ndim
-	//isInSphereList is array of bool with length ntotal
-
-	// double rtestsq = 0;
-	// bool inSphere = false; 
-
-	// for(long k = 0; k < dev_ndim; ++k){
-	// 	double xk = idx[k] - (*dev_halfb);
-	// 	rtestsq += xk * xk;
-	// }
-
-	// if(rtestsq < (*dev_rsquare)) inSphere = true; 
+__global__ void count_in(unsigned long long*dev_count, long *dev_ndim, long *dev_halfb, double *dev_rsquare, long *dev_base){
 	
-	// //may produce error
-	// //addone(dev_index, ndim, base, 0);
+	int pos = (blockIdx.x * blockDim.x) + threadIdx.x;
+	long num = pos;
+	double rtestsq = 0;
+	long idx = 0;
 
-	// long newv = index[i] + 1;
-	// if (newv >= base) {
-	// 	index[i] = 0;
-	// if (i < ndim - 1) 
-	// 	addone(index, ndim, base, i+1);
-	// }
-	// else {
-	// 	index[i] = newv;
-	// }
+	long index[MAXDIM];
 
-	// long i = 1;
-	// if(inSphere){
-	// 	atomicAdd(dev_count, i);
-	// }
+	for (long i = 0; i < (*dev_ndim); ++i){
+		index[i] = 0;
+	}
+  	
+  	while (num != 0) {
+    	long rem = num % (*dev_base);
+    	num = num / (*dev_base);
+    	index[idx] = rem;
+    	++idx;
+  	}
+
+	for(long k = 0; k < (*dev_ndim); ++k){
+		double xk = index[k] - (*dev_halfb);
+		rtestsq += xk * xk;
+	}
+
+	if(rtestsq< (*dev_rsquare)){
+
+		//This needs to be an atomic add
+		atomicAdd(dev_count, (unsigned long long)1);
+	}
 }
 
 void err_check(cudaError_t err, char* text){
@@ -64,14 +67,19 @@ long powlong(long n, long k)
   return p;
 }
 
-void count_in_seq(long *index, bool *sphereList, long pos,long ndim, long halfb, double rsquare, long base){ 
-	
-	//convert(pos, base, idx, ndim);
+void count_in_seq(ULL &count,int thread, int block,long ndim, long halfb, double rsquare, long base){ 
 
+	int pos = (block * 1024) + thread;
 	long num = pos;
+	double rtestsq = 0;
+	long idx = 0;
 
-	for (long i = 0; i < ndim; ++i) index[i] = 0;
-  	long idx = 0;
+	long index[MAXDIM];
+
+	for (long i = 0; i < ndim; ++i){
+		index[i] = 0;
+	}
+  	
   	while (num != 0) {
     	long rem = num % base;
     	num = num / base;
@@ -79,15 +87,16 @@ void count_in_seq(long *index, bool *sphereList, long pos,long ndim, long halfb,
     	++idx;
   	}
 
-	double rtestsq = 0;
-	bool inSphere = false; 
-
 	for(long k = 0; k < ndim; ++k){
 		double xk = index[k] - halfb;
 		rtestsq += xk * xk;
 	}
 
-	if(rtestsq< rsquare) sphereList[pos] = true;
+	if(rtestsq< rsquare){
+
+		//This needs to be an atomic add
+		count++;
+	}
 }
 
 
@@ -109,64 +118,47 @@ int main(int argc, char **argv){
     const long  ndim = lrand48() % (MAXDIM - 1) + 1;
     std::cout << "Trial Number " << n << " Radius " << radius << " Dimensions " << ndim << " ... " << std::endl;
 
-    long count = 0;
+    ULL count = 0;
 
     const long halfb = static_cast<long>(floor(radius));
   	const long base = 2 * halfb + 1;
   	const double rsquare = radius * radius;
   	const long ntotal = powlong(base, ndim);
 
-  	long *index = new long[ndim];
-  	bool *isInSphereList = new bool[ntotal];
 
-  	for(int i = 0; i < ndim; i++){
-  		index[i] = 0;
-  	}
-  	for(int i = 0; i < ntotal; i++){
-  		isInSphereList[i] = false;
-  	}
 
     //CUDA part
     //=======================================================
   	//we need to split the problem into each pixel being an integer point
 
-  	long *dev_index; 
-  	bool *dev_isInSphereList;
-  	long *dev_count;
+  	long *dev_index;
+  	ULL *dev_count;
   	long *dev_ndim; 
   	long *dev_halfb; 
   	double *dev_rsquare;
   	long *dev_base;
 
-  	cudaError_t err = cudaMalloc((void**)&dev_index, sizeof(long)*ndim);
-  	err_check(err, "index malloc");
-  	err = cudaMalloc((void**)&dev_isInSphereList, sizeof(bool)*ntotal);
-  	err_check(err, "isInSphereList malloc");
-  	err = cudaMalloc((void**)&dev_count, sizeof(long));
-  	err_check(err, "count malloc");
+  	cudaError_t err = cudaMalloc((void**)&dev_count, sizeof(unsigned long long));
+  	err_check(err, "count cpy to host");
   	err = cudaMalloc((void**)&dev_ndim, sizeof(long));
-  	err_check(err, "ndim malloc");
+  	err_check(err, "count cpy to host");
   	err = cudaMalloc((void**)&dev_halfb, sizeof(long));
-  	err_check(err, "halfb malloc");
+  	err_check(err, "count cpy to host");
   	err = cudaMalloc((void**)&dev_rsquare, sizeof(double));
-  	err_check(err, "rsquare malloc");
+  	err_check(err, "count cpy to host");
   	err = cudaMalloc((void**)&dev_base, sizeof(long));
-  	err_check(err, "base malloc");
+	err_check(err, "count cpy to host");
 
-  	err = cudaMemcpy(dev_index, index, sizeof(long)*ndim, cudaMemcpyHostToDevice);
-  	err_check(err, "index cpy");
-  	err = cudaMemcpy(dev_isInSphereList, isInSphereList, sizeof(bool)*ntotal, cudaMemcpyHostToDevice);
-  	err_check(err, "isinspherelist cpy");
-  	err = cudaMemcpy(dev_count, &count, sizeof(long), cudaMemcpyHostToDevice);
-  	err_check(err, "count cpy");
+  	err = cudaMemcpy(dev_count, &count, sizeof(unsigned long long), cudaMemcpyHostToDevice);
+  	err_check(err, "count cpy to host");
   	err = cudaMemcpy(dev_ndim, &ndim, sizeof(long), cudaMemcpyHostToDevice);
-  	err_check(err, "ndim cpy");
+  	err_check(err, "count cpy to host");
   	err = cudaMemcpy(dev_halfb, &halfb, sizeof(long), cudaMemcpyHostToDevice);
-  	err_check(err, "halfb cpy");
+  	err_check(err, "count cpy to host");
   	err = cudaMemcpy(dev_rsquare, &rsquare, sizeof(double), cudaMemcpyHostToDevice);
-  	err_check(err, "rsquare cpy");
-  	err = cudaMemcpy(dev_base, &base, sizeof(long),cudaMemcpyHostToDevice);
-  	err_check(err, "base cpy");
+  	err_check(err, "count cpy to host");
+	err = cudaMemcpy(dev_base, &base, sizeof(long),cudaMemcpyHostToDevice);
+	err_check(err, "count cpy to host"); 
 
   	int threadsPerBlock = 1024; 
   	int numBlocks = (ntotal + threadsPerBlock - 1) / threadsPerBlock;
@@ -175,25 +167,26 @@ int main(int argc, char **argv){
   	cout << "Number of Blocks Per Grid: " << numBlocks << endl;
   	cout << "N Total: " << ntotal << endl;
 
-  	count_in<<<threadsPerBlock, numBlocks>>>(dev_index, dev_isInSphereList, dev_count, dev_ndim, dev_halfb, dev_rsquare, dev_base);
+  	//count_in<<<threadsPerBlock, numBlocks>>>(dev_count, dev_ndim, dev_halfb, dev_rsquare, dev_base);
 
-  	err = cudaMemcpy(&count, dev_count, sizeof(long), cudaMemcpyDeviceToHost);
+  	err = cudaMemcpy(&count, dev_count, sizeof(unsigned long long), cudaMemcpyDeviceToHost);
   	err_check(err, "count cpy to host");
 
 
   	//sequential
+  	int thread = 0;
+  	int block = 0;
   	for(long n = 0; n < ntotal; ++n){
-  		count_in_seq(index, isInSphereList, n, ndim , halfb, rsquare, base);
-  	}
-
-  	for(int i = 0; i < ntotal; i++){
-  		if(isInSphereList[i]){
-  			count ++;
+  		count_in_seq(count, thread, block, ndim , halfb, rsquare, base);
+  		if(thread+1 > 1024){
+  			thread = 0;
+  			block+=1;
+  		}else{
+  			thread++;
   		}
   	}
 
     std::cout << " -> " << "count" << " " << count << "\n" << std::endl;
 
-    free(index);
   }
 }
